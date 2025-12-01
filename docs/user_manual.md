@@ -102,3 +102,33 @@ wundy:
       value: load_magnitude
       direction: [±1.0]
 
+---
+
+## 4. Material Models
+
+Wundy currently supports a single one-dimensional **linear elastic** material
+model for bar elements. Additional constitutive models may be added in future
+project installments, but all examples in this checkpoint use the elastic
+model described below.
+
+### 4.1 Elastic (type: `elastic`)
+
+An elastic material is defined in the YAML input under the `materials` key as a
+list of material objects. Each material has:
+
+- a **type** (currently only `elastic`),
+- a unique **name** used to reference it from element blocks,
+- a `parameters` mapping containing the elastic constants, and
+- an optional `density` used for gravitational body forces.
+
+**YAML structure**
+
+```yaml
+materials:
+  - type: elastic           # material model identifier
+    name: mat-1             # user-defined material name
+    parameters:
+      E: 10.0               # Young's modulus (same units as stress)
+      nu: 0.3               # Poisson's ratio (not used in 1D, kept for consistency)
+    density: 1.0            # mass density (used for GRAV distributed loads)
+

@@ -17,13 +17,13 @@ def material_tangent_stiffness_elastic(material: dict[str, Any]) -> float:
     Parameters
     ----------
     material:
-        Material dictionary with a ``"parameters"`` sub-dictionary containing
-        the key ``"E"`` for Young's modulus.
+        Material dictionary with a "parameters" sub-dictionary containing
+        the key "E" for Young's modulus.
 
     Returns
     -------
     float
-        Young's modulus :math:`E`.
+        Young's modulus E.
     """
     return float(material["parameters"]["E"])
 
@@ -35,17 +35,100 @@ def material_stress_elastic(material: dict[str, Any], strain: float) -> float:
     ----------
     material:
         Material dictionary compatible with
-        :func:`material_tangent_stiffness_elastic`.
+        material_tangent_stiffness_elastic.
     strain:
-        Axial strain :math:`\\varepsilon`.
+        Axial strain (epsilon).
 
     Returns
     -------
     float
-        Axial stress :math:`\\sigma = E \\varepsilon`.
+        Axial stress sigma = E * strain.
     """
     E = material_tangent_stiffness_elastic(material)
     return E * strain
+
+
+def lame_parameters_from_E_nu(material: dict[str, Any]) -> tuple[float, float]:
+    """Compute Lame parameters (lambda, mu) from E and nu for an isotropic material.
+
+    The material dictionary is expected to contain a "parameters" mapping
+    with entries "E" (Young's modulus) and "nu" (Poisson's ratio).
+    These are converted to the Lame constants using
+
+        mu     = E / (2 * (1 + nu))
+        lambda = E * nu / ((1 + nu) * (1 - 2 * nu))
+
+    Parameters
+    ----------
+    material:
+        Material dictionary with "parameters" containing "E" and "nu".
+
+    Returns
+    -------
+    (lambda_, mu)
+        Tuple of Lame parameters as floats.
+    """
+    params = material["parameters"]
+    E = float(params["E"])
+    nu = float(params["nu"])
+    mu = E / (2.0 * (1.0 + nu))
+    lambda_ = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
+    return lambda_, mu
+
+
+def material_neo_hooke_1d_pk1(
+    material: dict[str, Any],
+    F: float,
+) -> tuple[float, float]:
+    """Return 1D Neo-Hookean stress and tangent for the class model.
+
+    In this project we use the 1D Neo-Hooke law
+
+        sigma(F) = (E / 2) * (F - 1 / F),
+
+    where F is the stretch (1 + strain). In 1D we identify the scalar
+    first Piola–Kirchhoff stress with sigma.
+
+    Differentiating with respect to F gives the algorithmic tangent
+
+        d sigma / dF = (E / 2) * (1 + 1 / F^2).
+
+    A Taylor expansion around F = 1 shows that this model linearizes to
+    standard 1D linear elasticity with modulus E:
+
+        sigma(F) ≈ E * (F - 1)  for F close to 1.
+
+    Parameters
+    ----------
+    material:
+        Material dictionary with "parameters" containing "E" (Young's
+        modulus). Any "nu" entry is ignored by this 1D model.
+    F:
+        Stretch (deformation gradient in 1D). Must be positive.
+
+    Returns
+    -------
+    (P, dP_dF)
+        Tuple containing the 1D stress P and its derivative with respect
+        to F according to the formulas above.
+    """
+    if F <= 0.0:
+        raise ValueError(
+            f"Neo-Hooke 1D requires F > 0, got F = {F}. "
+            "Check your boundary conditions and initial guess."
+        )
+
+    E = float(material["parameters"]["E"])
+    inv_F = 1.0 / F
+    inv_F2 = inv_F * inv_F
+
+    # sigma(F) = (E/2) (F - F^{-1})
+    P = 0.5 * E * (F - inv_F)
+
+    # d sigma / dF = (E/2) (1 + F^{-2})
+    dP_dF = 0.5 * E * (1.0 + inv_F2)
+
+    return float(P), float(dP_dF)
 
 
 # ---------------------------------------------------------------------------
@@ -56,7 +139,7 @@ def material_stress_elastic(material: dict[str, Any], strain: float) -> float:
 def gauss_points_1d_two_point() -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Return abscissae and weights for 2-point Gauss quadrature on [-1, 1].
 
-    This rule is exact for polynomials up to degree three.  For the 2-node
+    This rule is exact for polynomials up to degree three. For the 2-node
     bar element used here the strain-displacement matrix is constant, so the
     integrands for stiffness and internal force are at most quadratic and
     are therefore integrated exactly by this rule.
@@ -66,58 +149,157 @@ def gauss_points_1d_two_point() -> tuple[NDArray[np.float64], NDArray[np.float64
     return xi, w
 
 
+def shape_functions_t1d1(xi: float) -> NDArray[np.float64]:
+    """Return shape functions N1, N2 for the 2-node 1D bar at xi.
+
+    The reference element is the interval xi in [-1, 1] with the usual
+    linear shape functions
+
+        N1(xi) = (1 - xi) / 2
+        N2(xi) = (1 + xi) / 2
+
+    Parameters
+    ----------
+    xi:
+        Gauss point in the reference coordinate system.
+
+    Returns
+    -------
+    ndarray
+        Array [N1, N2] evaluated at xi.
+    """
+    return np.array([(1.0 - xi) / 2.0, (1.0 + xi) / 2.0], dtype=float)
+
+
+def shape_function_derivatives_t1d1() -> NDArray[np.float64]:
+    """Return dN/dxi for the 2-node 1D bar (constant over the element).
+
+    On the reference element xi in [-1, 1] the derivatives of the shape
+    functions with respect to the reference coordinate xi are
+
+        dN1/dxi = -1/2
+        dN2/dxi = +1/2
+
+    Returns
+    -------
+    ndarray
+        Array [dN1_dxi, dN2_dxi].
+    """
+    return np.array([-0.5, 0.5], dtype=float)
+
+
 def element_stiffness_t1d1(
     xe: NDArray[np.float64],
     area: float,
     E: float,
 ) -> NDArray[np.float64]:
-    """Compute the 2×2 stiffness matrix for a T1D1 bar element with Gauss quadrature.
+    """Compute the 2x2 stiffness matrix for a T1D1 bar element with Gauss quadrature.
 
     The element is treated as a 2-node isoparametric bar on the reference
-    interval :math:`\\xi \\in [-1, 1]`.  The stiffness matrix is
+    interval xi in [-1, 1]. The stiffness matrix is obtained from
 
-    .. math::
+        k_e = integral of [B(xi)^T * E * A * B(xi) * J] over xi in [-1, 1],
 
-        k_e = \\int_{-1}^{1} B(\\xi)^T\\, E A\\, B(\\xi)\\, J\\,\\mathrm{d}\\xi ,
-
-    where :math:`B` is the strain–displacement matrix and :math:`J` is the
-    Jacobian (here :math:`J = h_e / 2`, the half element length).  Because
-    :math:`B` is constant for the linear T1D1 element, the 2-point Gauss
-    rule integrates this expression exactly.
+    where B is the strain–displacement vector and J is the Jacobian
+    (here J = he / 2, the half element length). For the linear T1D1
+    element B is constant, and the 2-point Gauss rule integrates this
+    expression exactly.
 
     Parameters
     ----------
     xe:
-        Coordinates of the two element nodes with shape ``(2, num_dim)``.
-        Only the first column ``xe[:, 0]`` (the x-coordinate) is used.
+        Coordinates of the two element nodes with shape (2, num_dim).
+        Only the first column xe[:, 0] (the x-coordinate) is used.
     area:
-        Cross-sectional area :math:`A` of the bar.
+        Cross-sectional area A of the bar.
     E:
-        Young’s modulus :math:`E`.
+        Young’s modulus E.
 
     Returns
     -------
     ndarray
-        Element stiffness matrix :math:`k_e` with shape ``(2, 2)``.
+        Element stiffness matrix k_e with shape (2, 2).
     """
     he = float(xe[1, 0] - xe[0, 0])
     if np.isclose(he, 0.0):
         raise ValueError("Zero-length element detected in element_stiffness_t1d1")
 
-    # 1D linear shape functions: N1 = (1-ξ)/2, N2 = (1+ξ)/2
-    # Their derivatives with respect to ξ are constant.
-    dN_dxi = np.array([-0.5, 0.5], dtype=float)
-
+    dN_dxi = shape_function_derivatives_t1d1()
     xi_gp, w_gp = gauss_points_1d_two_point()
-    J = he / 2.0  # dx/dξ for the linear mapping
+    J = he / 2.0  # dx/dxi for the linear mapping
 
     ke = np.zeros((2, 2), dtype=float)
     for a in range(xi_gp.size):
-        # B = dN/dx = dN/dξ * dξ/dx = dN/dξ / J
-        B = dN_dxi / J  # shape (2,)
+        B = dN_dxi / J  # dN/dx (constant here, but written in Gauss form)
         ke += (B[:, None] @ B[None, :]) * (E * area * J * w_gp[a])
 
     return ke
+
+
+def element_kinematics_t1d1(
+    xe: NDArray[np.float64],
+    ue: NDArray[np.float64],
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], float]:
+    """Compute basic 1D kinematic quantities at Gauss points for a T1D1 element.
+
+    This helper is the bridge from nodal displacements to finite-strain
+    quantities. It uses the 2-point Gauss rule on the reference interval
+    xi in [-1, 1] to compute, at each Gauss point,
+
+    * the deformation gradient F,
+    * the Green–Lagrange strain E = (F^2 - 1) / 2, and
+    * the strain–displacement vector B = du/dX.
+
+    For the linear 2-node bar these fields are constant along the element,
+    but we still return arrays with one value per Gauss point so that the
+    same interface can be used for more complex elements or materials.
+
+    Parameters
+    ----------
+    xe:
+        Coordinates of the two element nodes with shape (2, num_dim).
+        Only xe[:, 0] is used as the reference coordinate X.
+    ue:
+        Element displacement vector [u1, u2] with shape (2,).
+
+    Returns
+    -------
+    F_gp:
+        Array of deformation gradients at the Gauss points (length 2).
+    E_gp:
+        Array of Green–Lagrange strains at the Gauss points (length 2).
+    B:
+        Strain–displacement vector B with shape (2,) (same for all Gauss
+        points in this element).
+    J:
+        Jacobian J = dX/dxi = he / 2 for the mapping from the reference
+        coordinate to the reference configuration.
+    """
+    he = float(xe[1, 0] - xe[0, 0])
+    if np.isclose(he, 0.0):
+        raise ValueError("Zero-length element detected in element_kinematics_t1d1")
+
+    dN_dxi = shape_function_derivatives_t1d1()
+    xi_gp, _ = gauss_points_1d_two_point()
+    J = he / 2.0  # dX/dxi in the reference configuration
+
+    # B = du/dX = dN/dX = dN/dxi * dxi/dX
+    B = dN_dxi / J
+
+    F_gp = np.zeros_like(xi_gp)
+    E_gp = np.zeros_like(xi_gp)
+
+    # For a linear bar, du/dX and thus F are constant, but we keep the loop
+    # so that the structure matches a general Gauss-point loop.
+    du_dX = float(B @ ue)
+    F = 1.0 + du_dX
+    E = 0.5 * (F * F - 1.0)
+
+    for a in range(xi_gp.size):
+        F_gp[a] = F
+        E_gp[a] = E
+
+    return F_gp, E_gp, B, J
 
 
 def element_internal_force_t1d1(
@@ -128,34 +310,31 @@ def element_internal_force_t1d1(
 ) -> NDArray[np.float64]:
     """Compute internal nodal forces for a T1D1 element using Gauss quadrature.
 
-    The internal nodal force vector is obtained from
+    The internal nodal force vector is obtained by integrating
 
-    .. math::
+        f_int = integral of [B(xi)^T * sigma(xi) * A * J] over xi in [-1, 1],
 
-        f_\\text{int} = \\int_{-1}^{1} B(\\xi)^T \\, \\sigma(\\xi)\\, A\\, J\\,\\mathrm{d}\\xi ,
-
-    where :math:`\\sigma(\\xi) = E\\,\\varepsilon(\\xi)` and
-    :math:`\\varepsilon(\\xi) = B(\\xi) u_e`.  For the linear bar element the
-    strain and stress are constant, but we still perform the integral using
-    the same 2-point Gauss rule as in :func:`element_stiffness_t1d1` to
-    mirror the standard finite element formulation.
+    where sigma(xi) = E * strain(xi) and strain(xi) = B(xi) * ue.
+    For the linear bar element the strain and stress are constant, but we
+    still perform the integral using the same 2-point Gauss rule as in
+    element_stiffness_t1d1 to mirror the standard finite element formulation.
 
     Parameters
     ----------
     xe:
-        Coordinates of the two element nodes with shape ``(2, num_dim)``.
+        Coordinates of the two element nodes with shape (2, num_dim).
     area:
-        Cross-sectional area :math:`A` of the bar.
+        Cross-sectional area A of the bar.
     material:
         Material dictionary compatible with
-        :func:`material_tangent_stiffness_elastic`.
+        material_tangent_stiffness_elastic.
     ue:
-        Element displacement vector with shape ``(2,)``.
+        Element displacement vector with shape (2,).
 
     Returns
     -------
     ndarray
-        Internal nodal force vector :math:`f_\\text{int}` with shape ``(2,)``.
+        Internal nodal force vector f_int with shape (2,).
     """
     he = float(xe[1, 0] - xe[0, 0])
     if np.isclose(he, 0.0):
@@ -170,29 +349,135 @@ def element_internal_force_t1d1(
         B = dN_dxi / J
         strain = float(B @ ue)
         stress = material_stress_elastic(material, strain)
-        # f_int contribution: B^T * σ * A * J * w
+        # f_int contribution: B^T * sigma * A * J * w
         fint += B * stress * area * J * w_gp[a]
 
     return fint
 
 
-def element_external_force_t1d1(q: float, he: float) -> NDArray[np.float64]:
-    """Compute equivalent nodal forces for a uniform line load.
+def element_internal_force_neo_hooke_t1d1(
+    xe: NDArray[np.float64],
+    area: float,
+    material: dict[str, Any],
+    ue: NDArray[np.float64],
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Internal force and tangent for a Neo-Hooke T1D1 bar element.
+
+    The 1D Neo-Hooke model used in this project is
+
+        sigma(F) = (E / 2) * (F - 1 / F),
+
+    with stretch F = 1 + du/dX. For a two-node bar we approximate
+    du/dX = B * u_e, where B is the strain–displacement vector and u_e
+    are the element nodal displacements.
+
+    The internal nodal force vector and consistent tangent stiffness are
+
+        f_int = integral of [B^T * sigma(F) * A * J] over xi in [-1, 1]
+        k_e   = integral of [B^T * (d sigma / dF) * B * A * J] over xi in [-1, 1]
+
+    evaluated with 2-point Gauss quadrature.
+
+    Parameters
+    ----------
+    xe:
+        Coordinates of the two element nodes with shape (2, num_dim).
+    area:
+        Cross-sectional area A.
+    material:
+        Material dictionary with parameters["E"] defining the modulus.
+    ue:
+        Element displacement vector with shape (2,).
+
+    Returns
+    -------
+    (f_int, k_e)
+        Internal nodal force vector and 2x2 consistent tangent matrix.
+    """
+    he = float(xe[1, 0] - xe[0, 0])
+    if np.isclose(he, 0.0):
+        raise ValueError("Zero-length element detected in element_internal_force_neo_hooke_t1d1")
+
+    # dN/dxi for 2-node bar; B = dN/dx = dN/dxi / J
+    dN_dxi = np.array([-0.5, 0.5], dtype=float)
+    xi_gp, w_gp = gauss_points_1d_two_point()
+    J = he / 2.0
+
+    f_int = np.zeros(2, dtype=float)
+    k_e = np.zeros((2, 2), dtype=float)
+
+    for a in range(xi_gp.size):
+        B = dN_dxi / J  # constant for the linear bar
+        du_dX = float(B @ ue)
+        F = 1.0 + du_dX
+
+        P, dP_dF = material_neo_hooke_1d_pk1(material, F)
+
+        # Internal force: B^T * P * A * J * w
+        f_int += B * P * area * J * w_gp[a]
+
+        # Tangent: B^T * (dP/dF) * B * A * J * w
+        k_e += np.outer(B, B) * dP_dF * area * J * w_gp[a]
+
+    return f_int, k_e
+
+
+def element_residual_t1d1(
+    f_int: NDArray[np.float64],
+    f_ext: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Return the element residual vector r_e = f_int - f_ext.
+
+    In the global Newton solve we assemble the residual from
+
+        R(u) = f_int(u) - f_ext,
+
+    so a converged solution satisfies R = 0 at all free degrees of freedom.
+    """
+    return f_int - f_ext
+
+
+def element_external_force_t1d1(
+    q: float,
+    he: float,
+) -> NDArray[np.float64]:
+    """Compute equivalent nodal forces for a 1D line load using Gauss quadrature.
+
+    The consistent nodal load vector for an axial line load q(x) is
+
+        f_e = integral of [N(x)^T * q(x)] dx over the element.
+
+    In this project we currently use a uniform load q = const, but the
+    integral is evaluated with the same 2-point Gauss rule as the stiffness
+    and internal force computations. For constant q this reproduces the
+    familiar closed-form result
+
+        f_e = q * he / 2 * [1, 1]^T.
 
     Parameters
     ----------
     q:
-        Uniform line load :math:`q` (force per unit length) in the axial
-        direction.
+        Uniform line load q (force per unit length) in the axial direction.
+        In future extensions this could be generalized to a position-dependent
+        load evaluated at the Gauss points.
     he:
-        Element length :math:`h_e`.
+        Element length he.
 
     Returns
     -------
     ndarray
         Two-component nodal force vector for the element.
     """
-    return q * he / 2.0 * np.ones(2, dtype=float)
+    xi_gp, w_gp = gauss_points_1d_two_point()
+    J = he / 2.0
+
+    fe = np.zeros(2, dtype=float)
+    for a in range(xi_gp.size):
+        N = shape_functions_t1d1(xi_gp[a])
+        # For now q is constant; later q(xi_gp[a]) could be used here instead.
+        fe += N * q * J * w_gp[a]
+
+    return fe
 
 
 # ---------------------------------------------------------------------------
@@ -207,9 +492,9 @@ def apply_neumann_bcs(
 ) -> None:
     """Add Neumann (force) boundary conditions to the global force vector.
 
-    For each boundary–condition entry of type :data:`NEUMANN`, this routine
+    For each boundary-condition entry of type NEUMANN, this routine
     loops over the listed nodes, computes the corresponding global degree of
-    freedom, and adds the prescribed value to the force vector ``F`` in place.
+    freedom, and adds the prescribed value to the force vector F in place.
     """
     for bc in bcs:
         if bc["type"] == NEUMANN:
@@ -229,15 +514,15 @@ def apply_distributed_loads(
 ) -> None:
     """Assemble equivalent nodal forces for all distributed loads.
 
-    The input ``dloads`` is a list of preprocessed distributed–load
-    dictionaries.  For each load and each affected element this routine
+    The input dloads is a list of preprocessed distributed-load dictionaries.
+    For each load and each affected element this routine
 
-    * finds the element and its nodes via ``block_elem_map`` and ``blocks``,
+    * finds the element and its nodes via block_elem_map and blocks,
     * computes the element length and area,
-    * determines the scalar line load ``q`` based on the load ``type``
-      (``"BX"`` or ``"GRAV"``) and the requested direction, and
-    * uses :func:`element_external_force_t1d1` to obtain equivalent nodal
-      forces which are then added to ``F`` in place.
+    * determines the scalar line load q based on the load type
+      ("BX" or "GRAV") and the requested direction, and
+    * uses element_external_force_t1d1 to obtain equivalent nodal
+      forces which are then added to F in place.
     """
     for dload in dloads:
         dtype = dload["type"]
@@ -282,15 +567,15 @@ def collect_dirichlet_dofs(
 ) -> tuple[NDArray[np.int_], NDArray[np.float64]]:
     """Extract Dirichlet degrees of freedom and their prescribed values.
 
-    This helper scans the boundary–condition list, selects entries of type
-    :data:`DIRICHLET`, and converts their node lists and local degrees of
-    freedom into global DOF indices.
+    This helper scans the boundary-condition list, selects entries of type
+    DIRICHLET, and converts their node lists and local degrees of freedom
+    into global degree-of-freedom indices.
 
     Returns
     -------
     tuple of (indices, values)
-        ``indices`` is an integer array of global DOF numbers and
-        ``values`` is a float array of the corresponding prescribed
+        indices is an integer array of global degree-of-freedom numbers and
+        values is a float array of the corresponding prescribed
         displacement values.
     """
     prescribed_dofs: list[int] = []
@@ -316,19 +601,17 @@ def solve_reduced_system(
 ) -> NDArray[np.float64]:
     """Solve the constrained linear system and assemble the full DOF vector.
 
-    The global system :math:`K u = F` is partitioned into free and prescribed
-    degrees of freedom.  The reduced system for the free part is
+    The global system K u = F is partitioned into free and prescribed
+    degrees of freedom. The reduced system for the free part is
 
-    .. math::
+        K_ff * u_f = F_f - K_fp * u_p,
 
-        K_{ff} u_f = F_f - K_{fp} u_p ,
-
-    where :math:`u_p` contains the prescribed values.  This routine
+    where u_p contains the prescribed values. This routine
 
     1. builds the index sets of free and prescribed DOFs,
-    2. forms :math:`K_{ff}` and :math:`K_{fp}`,
-    3. solves for :math:`u_f`, and
-    4. assembles and returns the full displacement vector ``u``.
+    2. forms K_ff and K_fp,
+    3. solves for u_f, and
+    4. assembles and returns the full displacement vector u.
     """
     num_dof = K.shape[0]
     all_dofs: NDArray[np.int_] = np.arange(num_dof, dtype=int)
@@ -358,47 +641,47 @@ def first_fe_code(
     materials: dict[str, Any],
     block_elem_map: dict[int, tuple[int, int]],
 ) -> dict[str, Any]:
-    """Assemble and solve a 1D linear–elastic finite element problem.
+    """Assemble and solve a 1D linear-elastic finite element problem.
 
-    This routine implements a small 1D bar solver for linear statics.  It uses
-    preprocessed data from :mod:`wundy.ui` and performs the following steps:
+    This routine implements a small 1D bar solver for linear statics. It uses
+    preprocessed data from wundy.ui and performs the following steps:
 
     1. Assemble the global stiffness matrix from all element blocks using
-       :func:`element_stiffness_t1d1` and the material response functions.
-    2. Assemble the global right–hand side from Neumann boundary conditions
-       via :func:`apply_neumann_bcs` and from distributed loads via
-       :func:`apply_distributed_loads`.
+       element_stiffness_t1d1 and the material response functions.
+    2. Assemble the global right-hand side from Neumann boundary conditions
+       via apply_neumann_bcs and from distributed loads via
+       apply_distributed_loads.
     3. Impose Dirichlet boundary conditions by collecting prescribed degrees
-       of freedom with :func:`collect_dirichlet_dofs` and solving the reduced
-       linear system through :func:`solve_reduced_system`.
+       of freedom with collect_dirichlet_dofs and solving the reduced
+       linear system through solve_reduced_system.
     4. Return the full displacement vector, global stiffness matrix and
        assembled force vector.
 
     The problem is a linear, static, 1D bar with one translational degree of
-    freedom per node and two–node ``T1D1`` elements.
+    freedom per node and two-node T1D1 elements.
 
     Parameters
     ----------
     coords:
-        Nodal coordinates with shape ``(num_node, num_dim)``; only the first
-        column (x–coordinate) is used here.
+        Nodal coordinates with shape (num_node, num_dim); only the first
+        column (x-coordinate) is used here.
     blocks:
-        List of element–block dictionaries from :func:`wundy.ui.preprocess`.
-        Each block must provide the connectivity (``"connect"``), element
-        description (``"element"``) and material name (``"material"``).
+        List of element-block dictionaries from wundy.ui.preprocess.
+        Each block must provide the connectivity ("connect"), element
+        description ("element") and material name ("material").
     bcs:
-        Boundary–condition dictionaries describing Dirichlet and Neumann
+        Boundary-condition dictionaries describing Dirichlet and Neumann
         conditions in preprocessed form.
     dloads:
-        Distributed–load dictionaries describing body forces of type
-        ``"BX"`` (user-specified line load) or ``"GRAV"`` (gravity using
+        Distributed-load dictionaries describing body forces of type
+        "BX" (user-specified line load) or "GRAV" (gravity using
         material density).
     materials:
         Mapping from material name to dictionaries that contain at least a
-        ``"parameters"`` sub-dictionary with the Young’s modulus ``"E"`` and,
-        for gravitational loads, a ``"density"`` entry.
+        "parameters" sub-dictionary with the Young’s modulus "E" and,
+        for gravitational loads, a "density" entry.
     block_elem_map:
-        Mapping from global element index to ``(block_index, local_elem_index)``
+        Mapping from global element index to (block_index, local_elem_index)
         specifying which block an element belongs to and its local index.
 
     Returns
@@ -406,12 +689,12 @@ def first_fe_code(
     dict
         A dictionary with keys
 
-        ``"dofs"`` :
+        "dofs":
             Full vector of nodal displacements.
-        ``"stiff"`` :
-            Global stiffness matrix :math:`K`.
-        ``"force"`` :
-            Global assembled force vector :math:`F`.
+        "stiff":
+            Global stiffness matrix K.
+        "force":
+            Global assembled force vector F.
     """
     dof_per_node: int = 1
     num_node = coords.shape[0]
@@ -444,6 +727,120 @@ def first_fe_code(
     return solution
 
 
+def newton_bar_neo_hooke_1d(
+    coords: NDArray[np.float64],
+    blocks: list[dict[str, Any]],
+    bcs: list[dict[str, Any]],
+    dloads: list[dict[str, Any]],
+    materials: dict[str, Any],
+    block_elem_map: dict[int, tuple[int, int]],
+    max_iter: int = 25,
+    tol: float = 1.0e-10,
+) -> dict[str, Any]:
+    """Solve a 1D bar problem with Neo-Hooke material using Newton–Raphson.
+
+    This routine uses the same mesh, blocks, and load description as
+    first_fe_code, but replaces the linear elastic constitutive
+    model with the 1D Neo-Hooke law implemented in
+    material_neo_hooke_1d_pk1. The global nonlinear system
+
+        R(u) = f_int(u) - f_ext = 0
+
+    is solved by Newton–Raphson on the free degrees of freedom using the
+    consistent tangent stiffness assembled from
+    element_internal_force_neo_hooke_t1d1.
+
+    Parameters
+    ----------
+    coords, blocks, bcs, dloads, materials, block_elem_map:
+        Same preprocessed data structures as used in first_fe_code.
+    max_iter:
+        Maximum number of Newton iterations.
+    tol:
+        Convergence tolerance on the infinity-norm of the residual at the
+        free degrees of freedom.
+
+    Returns
+    -------
+    dict
+        Dictionary with keys
+
+        "dofs":
+            Converged nodal displacement vector.
+        "stiff":
+            Final global tangent stiffness matrix.
+        "force_int":
+            Global internal force vector at the final state.
+        "force_ext":
+            Global external force vector (Neumann + distributed loads).
+        "residual":
+            Final residual vector f_int - f_ext.
+        "iterations":
+            Number of Newton iterations performed.
+    """
+    dof_per_node: int = 1
+    num_node = coords.shape[0]
+    num_dof = int(num_node * dof_per_node)
+
+    # External forces are independent of displacement -> assemble once.
+    F_ext = np.zeros(num_dof, dtype=float)
+    apply_neumann_bcs(F_ext, bcs, dof_per_node)
+    apply_distributed_loads(F_ext, dloads, coords, blocks, block_elem_map, materials, dof_per_node)
+
+    # Dirichlet data
+    prescribed_idx, prescribed_vals = collect_dirichlet_dofs(bcs, dof_per_node)
+    all_dofs: NDArray[np.int_] = np.arange(num_dof, dtype=int)
+    free_dofs: NDArray[np.int_] = np.setdiff1d(all_dofs, prescribed_idx)
+
+    # Initial guess: zero displacement, with prescribed DOFs set directly
+    u = np.zeros(num_dof, dtype=float)
+    if prescribed_idx.size:
+        u[prescribed_idx] = prescribed_vals
+
+    for it in range(max_iter):
+        K = np.zeros((num_dof, num_dof), dtype=float)
+        F_int = np.zeros(num_dof, dtype=float)
+
+        # --- Assemble internal forces and tangent stiffness ---
+        for block in blocks:
+            area = float(block["element"]["properties"]["area"])
+            material = materials[block["material"]]
+
+            for nodes in block["connect"]:
+                eft = [global_dof(n, j, dof_per_node) for n in nodes for j in range(dof_per_node)]
+                xe = coords[nodes]
+                ue = u[eft]
+
+                f_int_e, k_e = element_internal_force_neo_hooke_t1d1(xe, area, material, ue)
+
+                F_int[eft] += f_int_e
+                K[np.ix_(eft, eft)] += k_e
+
+        # --- Global residual and convergence check ---
+        R = F_int - F_ext
+        R_free = R[free_dofs]
+        res_norm = float(np.linalg.norm(R_free, ord=np.inf))
+
+        if res_norm < tol:
+            return {
+                "dofs": u,
+                "stiff": K,
+                "force_int": F_int,
+                "force_ext": F_ext,
+                "residual": R,
+                "iterations": it,
+            }
+
+        # --- Newton update on free DOFs ---
+        K_ff = K[np.ix_(free_dofs, free_dofs)]
+        du_f = -np.linalg.solve(K_ff, R_free)
+        u[free_dofs] += du_f
+
+    raise RuntimeError(
+        f"Newton solver did not converge in {max_iter} iterations; final residual norm = {res_norm}"
+    )
+
+
 def global_dof(node: int, local_dof: int, dof_per_node: int) -> int:
-    """Return the global degree-of-freedom index for a node and local dof."""
+    """Return the global degree-of-freedom index for a node and local DOF."""
     return node * dof_per_node + local_dof

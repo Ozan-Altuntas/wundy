@@ -88,13 +88,22 @@ def validate_material_parameters(material: dict[str, dict[str, Any]]) -> bool:
     elastic = Schema(
         {
             "E": And(isnumeric, ispositive, error="E must be > 0"),
-            "nu": And(isnumeric, lambda x: -1.0 <= x < 0.5, error="nu must be between -1 and .5"),
+            "nu": And(
+                isnumeric,
+                lambda x: -1.0 <= x < 0.5,
+                error="nu must be between -1 and .5",
+            ),
         }
     )
-    if normalize_case(material["type"]) == "ELASTIC":
+
+    mat_type = normalize_case(material["type"])
+
+    # Both ELASTIC and NEO_HOOKE share the same parameter requirements (E, nu)
+    if mat_type in {"ELASTIC", "NEO_HOOKE", "NEO-HOOKE"}:
         elastic.validate(material["parameters"])
     else:
         raise ValueError(f"Unknown material {material['type']!r}")
+
     return True
 
 
