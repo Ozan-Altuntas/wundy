@@ -1,6 +1,9 @@
 # wundy
 One dimension finite element program
 
+## Documentation
+- [User Manual](docs/user_manual.md)
+
 ## Install
 
 ### Clone repository
@@ -32,3 +35,4 @@ In the `wundy` directory, execute
 ```console
 pytest
 ```
+
