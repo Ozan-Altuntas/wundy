@@ -142,3 +142,56 @@ wundy:
             [0, 0, 0, -10, 10],
         ],
     )
+
+def test_gauss_element_stiffness_t1d1():
+    """element_stiffness_t1d1 should match the analytic bar stiffness matrix.
+
+    For a 2-node bar of length h = 1, area A = 2, and E = 10, the exact
+    stiffness matrix is
+
+        k = (E*A/h) * [[1, -1],
+                       [-1, 1]].
+
+    The Gauss-quadrature implementation in element_stiffness_t1d1 should
+    reproduce this exactly.
+    """
+    # Element from x = 0 to x = 1
+    xe = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
+    area = 2.0
+    E = 10.0
+    h = 1.0
+
+    ke = wundy.first.element_stiffness_t1d1(xe, area, E)
+
+    ke_exact = (E * area / h) * np.array([[1.0, -1.0], [-1.0, 1.0]], dtype=float)
+    assert np.allclose(ke, ke_exact)
+
+def test_gauss_element_internal_force_t1d1():
+    """element_internal_force_t1d1 should reproduce the exact internal forces.
+
+    For a bar of length h = 1, A = 2, E = 10 with nodal displacements
+    u = [0.0, 0.1], the strain is 0.1 and the stress is 1.0. The exact
+    internal nodal forces are [-2.0, 2.0].
+    """
+    xe = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
+    area = 2.0
+    material = {
+        "parameters": {"E": 10.0, "nu": 0.3},
+    }
+    ue = np.array([0.0, 0.1], dtype=float)
+
+    fint = wundy.first.element_internal_force_t1d1(xe, area, material, ue)
+
+    fint_exact = np.array([-2.0, 2.0], dtype=float)
+    assert np.allclose(fint, fint_exact)
+
+def test_gauss_points_1d_two_point():
+    """Check that the 2-point Gauss rule is implemented correctly."""
+    xi, w = wundy.first.gauss_points_1d_two_point()
+
+    # Points should be ±1/sqrt(3), weights should be 1.
+    expected_xi = np.array([-1.0 / np.sqrt(3.0), 1.0 / np.sqrt(3.0)], dtype=float)
+    expected_w = np.ones(2, dtype=float)
+
+    assert np.allclose(xi, expected_xi)
+    assert np.allclose(w, expected_w)
