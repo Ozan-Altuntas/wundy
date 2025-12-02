@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -480,6 +481,100 @@ def element_external_force_t1d1(
     return fe
 
 
+def element_stiffness_euler_bernoulli(
+    E: float,
+    I: float,
+    L: float,
+) -> NDArray[np.float64]:
+    """Return the 4×4 Euler–Bernoulli beam stiffness matrix.
+
+    Two-node beam with bending DOFs [w1, theta1, w2, theta2].
+    E is Young's modulus, I is the second moment of area, and L is the
+    element length.
+    """
+    if L <= 0.0:
+        raise ValueError(f"Beam element length must be positive, got L = {L}")
+
+    factor = E * I / (L**3)
+
+    return factor * np.array(
+        [
+            [12.0, 6.0 * L, -12.0, 6.0 * L],
+            [6.0 * L, 4.0 * L * L, -6.0 * L, 2.0 * L * L],
+            [-12.0, -6.0 * L, 12.0, -6.0 * L],
+            [6.0 * L, 2.0 * L * L, -6.0 * L, 4.0 * L * L],
+        ],
+        dtype=float,
+    )
+
+
+def element_load_euler_bernoulli_uniform(
+    q: float,
+    L: float,
+) -> NDArray[np.float64]:
+    """Consistent nodal load vector for a uniform transverse load q.
+
+    Two-node Euler–Bernoulli beam with DOFs [w1, theta1, w2, theta2].
+    q is a constant load per unit length (positive in the chosen
+    transverse direction), L is the element length.
+
+    The result is [F1, M1, F2, M2] where F are equivalent nodal forces
+    and M are equivalent nodal moments.
+    """
+    if L <= 0.0:
+        raise ValueError(f"Beam element length must be positive, got L = {L}")
+
+    return np.array(
+        [
+            q * L / 2.0,  # F1
+            q * L * L / 12.0,  # M1
+            q * L / 2.0,  # F2
+            -q * L * L / 12.0,  # M2
+        ],
+        dtype=float,
+    )
+
+
+def element_external_force_t1d1_arbitrary(
+    xe: NDArray[np.float64],
+    q_func: Callable[[float], float],
+) -> NDArray[np.float64]:
+    """Equivalent nodal force for arbitrary line load q(x).
+
+    q_func(x) returns the load at physical coordinate x.
+    """
+    x1, _ = xe[0]
+    x2, _ = xe[1]
+    L = x2 - x1
+
+    # 2-point Gauss rule
+    xi, w = gauss_points_1d_two_point()
+
+    f = np.zeros(2, dtype=float)
+
+    for i in range(2):
+        xi_i = xi[i]
+        w_i = w[i]
+
+        # Shape functions
+        N1 = 0.5 * (1 - xi_i)
+        N2 = 0.5 * (1 + xi_i)
+
+        # Map xi → x
+        x = x1 * N1 + x2 * N2
+
+        qx = q_func(x)
+
+        # Jacobian
+        J = L / 2.0
+
+        # Consistent nodal load
+        f[0] += N1 * qx * J * w_i
+        f[1] += N2 * qx * J * w_i
+
+    return f
+
+
 # ---------------------------------------------------------------------------
 # Global assembly helpers
 # ---------------------------------------------------------------------------
@@ -512,18 +607,7 @@ def apply_distributed_loads(
     materials: dict[str, Any],
     dof_per_node: int,
 ) -> None:
-    """Assemble equivalent nodal forces for all distributed loads.
-
-    The input dloads is a list of preprocessed distributed-load dictionaries.
-    For each load and each affected element this routine
-
-    * finds the element and its nodes via block_elem_map and blocks,
-    * computes the element length and area,
-    * determines the scalar line load q based on the load type
-      ("BX" or "GRAV") and the requested direction, and
-    * uses element_external_force_t1d1 to obtain equivalent nodal
-      forces which are then added to F in place.
-    """
+    """Assemble equivalent nodal forces for all distributed loads."""
     for dload in dloads:
         dtype = dload["type"]
         direction = np.array(dload["direction"], dtype=float)
@@ -533,11 +617,13 @@ def apply_distributed_loads(
         if sign == 0.0:
             raise ValueError(f"dload direction must be ±1, got {direction[0]}")
 
+        profile = dload.get("profile", "UNIFORM").upper()
+
         for eid in dload["elements"]:
             if eid not in block_elem_map:
                 raise ValueError(
                     f"Element {eid} in distributed load "
-                    f"{dload['name']} not found in any element block"
+                    f"{dload.get('name', '<unnamed>')} not found in any element block"
                 )
 
             block_index, local_index = block_elem_map[eid]
@@ -548,16 +634,42 @@ def apply_distributed_loads(
             area = float(block["element"]["properties"]["area"])
 
             if dtype == "BX":
-                q = float(dload["value"]) * sign
+                # Body force per unit length, using profile
+                if profile == "UNIFORM":
+                    q = float(dload["value"]) * sign
+                    qe = element_external_force_t1d1(q, he)
+
+                elif profile == "TABLE":
+                    x_tab = np.asarray(dload["x"], dtype=float)
+                    q_tab = np.asarray(dload["q"], dtype=float)
+
+                    def q_func(x, x_tab=x_tab, q_tab=q_tab, sign=sign):
+                        return float(np.interp(x, x_tab, q_tab)) * sign
+
+                    qe = element_external_force_t1d1_arbitrary(xe, q_func)
+
+                elif profile == "EQUATION":
+                    expr = dload["expression"]
+
+                    def q_func(x, expr=expr, sign=sign):
+                        # Safe-ish environment: only x and numpy
+                        return float(eval(expr, {"x": x, "np": np})) * sign
+
+                    qe = element_external_force_t1d1_arbitrary(xe, q_func)
+
+                else:
+                    raise ValueError(f"Unknown distributed-load profile {profile!r}")
+
             elif dtype == "GRAV":
                 mat = materials[block["material"]]
-                rho = float(mat["density"])
+                rho = float(mat.get("density", 0.0))
                 q = rho * area * float(dload["value"]) * sign
+                qe = element_external_force_t1d1(q, he)
+
             else:
                 raise NotImplementedError(f"dload type {dtype!r} not supported for 1D")
 
             eft = [global_dof(n, j, dof_per_node) for n in nodes for j in range(dof_per_node)]
-            qe = element_external_force_t1d1(q, he)
             F[eft] += qe
 
 

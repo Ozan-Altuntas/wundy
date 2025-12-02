@@ -243,7 +243,7 @@ def preprocess(data: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
             }
         )
 
-    # Process distributed load
+    # Process distributed loads
     dload: list[Any] = preprocessed.setdefault("dload", [])
     for i, dl in enumerate(inp.get("distributed loads", [])):
         if "name" in dl:
@@ -251,6 +251,7 @@ def preprocess(data: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         else:
             name = unique_name(inp["distributed loads"], "DLOAD")
             dl["name"] = name
+
         elems: list[int] = []
         if isinstance(dl["elements"], str):
             # elements given as set name
@@ -260,7 +261,7 @@ def preprocess(data: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
                     f"Element set {dl['elements']!r}, required by distributed load {i + 1}, not defined"
                 )
             else:
-                elems.extend(elsets[eb["elements"]])
+                elems.extend(elsets[dl["elements"]])
         else:
             for e in dl["elements"]:
                 if e not in elem_map:
@@ -270,15 +271,30 @@ def preprocess(data: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
                     )
                 else:
                     elems.append(elem_map[e])
-        dload.append(
-            {
-                "name": name,
-                "elements": elems,
-                "type": dl["type"],
-                "value": dl["value"],
-                "direction": dl["direction"],
-            }
-        )
+
+        # Base entry: old fields (all existing inputs keep working)
+        entry: dict[str, Any] = {
+            "name": name,
+            "elements": elems,
+            "type": dl["type"],
+            "direction": dl["direction"],
+        }
+
+        # "value" is used for UNIFORM loads and GRAV
+        if "value" in dl:
+            entry["value"] = dl["value"]
+
+        # Optional arbitrary-load fields, already validated by schemas.py
+        if "profile" in dl:
+            entry["profile"] = dl["profile"]
+        if "x" in dl:
+            entry["x"] = [float(x) for x in dl["x"]]
+        if "q" in dl:
+            entry["q"] = [float(q) for q in dl["q"]]
+        if "expression" in dl:
+            entry["expression"] = dl["expression"]
+
+        dload.append(entry)
 
     # Create a mapping from global element index to block index, local elem index (within the block)
     block_elem_map: dict[int, tuple[int, int]] = preprocessed.setdefault("block_elem_map", {})

@@ -383,3 +383,110 @@ def test_newton_bar_neo_hooke_matches_linear_for_small_load():
         atol=1e-6,
     )
 
+def test_euler_beam_stiffness_matches_closed_form():
+    """Euler beam stiffness should match the standard 4x4 formula."""
+    E = 10.0
+    I = 2.0
+    L = 3.0
+
+    ke = wundy.first.element_stiffness_euler_bernoulli(E, I, L)
+
+    factor = E * I / (L**3)
+    ke_exact = factor * np.array(
+        [
+            [12.0, 6.0 * L, -12.0, 6.0 * L],
+            [6.0 * L, 4.0 * L * L, -6.0 * L, 2.0 * L * L],
+            [-12.0, -6.0 * L, 12.0, -6.0 * L],
+            [6.0 * L, 2.0 * L * L, -6.0 * L, 4.0 * L * L],
+        ],
+        dtype=float,
+    )
+
+    assert np.allclose(ke, ke_exact)
+
+
+def test_euler_beam_uniform_load_vector():
+    """Check consistent nodal loads for a uniform transverse load."""
+    q = 1.5
+    L = 2.0
+
+    fe = wundy.first.element_load_euler_bernoulli_uniform(q, L)
+
+    fe_exact = np.array(
+        [
+            q * L / 2.0,
+            q * L * L / 12.0,
+            q * L / 2.0,
+            -q * L * L / 12.0,
+        ],
+        dtype=float,
+    )
+
+    assert np.allclose(fe, fe_exact)
+
+def test_arbitrary_dload_manufactured_solution():
+    """element_external_force_t1d1_arbitrary integrates q(x) correctly.
+
+    We take a single element from x=0 to x=1, shape functions
+
+        N1(x) = 1 - x
+        N2(x) = x
+
+    and a polynomial distributed load q(x) = x^2. The consistent nodal forces are
+
+        f1 = ∫_0^1 (1 - x) x^2 dx = ∫_0^1 (x^2 - x^3) dx
+           = [x^3/3 - x^4/4]_0^1 = 1/3 - 1/4 = 1/12
+
+        f2 = ∫_0^1 x * x^2 dx = ∫_0^1 x^3 dx
+           = [x^4/4]_0^1 = 1/4.
+
+    The 2-point Gauss rule should integrate this cubic exactly, so the
+    numerical result from element_external_force_t1d1_arbitrary should match
+    [1/12, 1/4].
+    """
+
+    def q_func(x: float) -> float:
+        return x**2
+
+    # Element from x = 0 to x = 1
+    xe = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
+
+    f_num = wundy.first.element_external_force_t1d1_arbitrary(xe, q_func)
+
+    f_exact = np.array([1.0 / 12.0, 1.0 / 4.0], dtype=float)
+
+    assert np.allclose(f_num, f_exact, rtol=1e-12, atol=1e-12)
+
+def test_euler_beam_manufactured_solution():
+    """Check Euler–Bernoulli element load vector for uniform q.
+
+    For a 2-node Euler–Bernoulli beam element of length L with constant
+    transverse distributed load q (downward positive), the consistent
+    nodal load vector in local coordinates is
+
+        [ q L / 2,
+          q L^2 / 12,
+          q L / 2,
+         -q L^2 / 12 ]^T.
+
+    The implementation in element_load_euler_bernoulli_uniform should match
+    this textbook result.
+    """
+    E = 2.0
+    I = 3.0
+    L = 1.5
+    q = 5.0
+
+    fe_num = wundy.first.element_load_euler_bernoulli_uniform(q, L)
+
+    fe_exact = np.array(
+        [
+            q * L / 2.0,
+            q * L**2 / 12.0,
+            q * L / 2.0,
+            -q * L**2 / 12.0,
+        ],
+        dtype=float,
+    )
+
+    assert np.allclose(fe_num, fe_exact, rtol=1e-12, atol=1e-12)

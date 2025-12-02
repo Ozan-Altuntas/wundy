@@ -74,6 +74,42 @@ def valid_dload_type(arg: str):
     return normalize_case(arg) in {"BX", "GRAV"}
 
 
+dload_profiles = {"UNIFORM", "TABLE", "EQUATION"}
+
+
+def valid_dload_profile(arg: str) -> bool:
+    return normalize_case(arg) in dload_profiles
+
+
+def validate_dload_profile_fields(d: dict[str, Any]) -> bool:
+    """Cross-field checks for distributed-load profiles.
+
+    - UNIFORM  : must have "value"
+    - TABLE    : must have matching "x" and "q" arrays (length >= 2)
+    - EQUATION : must have an "expression" string
+    """
+    profile = normalize_case(d.get("profile", "UNIFORM"))
+
+    if profile == "UNIFORM":
+        return "value" in d
+
+    if profile == "TABLE":
+        return (
+            "x" in d
+            and "q" in d
+            and isinstance(d["x"], list)
+            and isinstance(d["q"], list)
+            and len(d["x"]) == len(d["q"])
+            and len(d["x"]) >= 2
+        )
+
+    if profile == "EQUATION":
+        expr = d.get("expression")
+        return isinstance(expr, str) and expr.strip() != ""
+
+    return False
+
+
 def validate_element(elem: dict[str, Any]) -> bool:
     if normalize_case(elem["type"]) == "T1D1":
         schema = Schema({Optional("area", default=1.0): And(isnumeric, ispositive)})
@@ -179,17 +215,27 @@ dload_schema = Schema(
                 And(list, list_of_int),  # list of elements
             ),
             "type": And(str, valid_dload_type, Use(normalize_case)),
-            "value": Use(float),
+            # For UNIFORM loads we still use "value".
+            Optional("value", default=0.0): Use(float),
+            # New: distributed-load profile
+            Optional("profile", default="UNIFORM"): And(str, Use(normalize_case)),
+            # New: TABLE data
+            Optional("x"): And(list, list_of_numeric),
+            Optional("q"): And(list, list_of_numeric),
+            # New: EQUATION data
+            Optional("expression"): And(str),
             "direction": And(
                 list,
                 list_of_numeric,
-                lambda sequence: len(sequence) == 1,  # change to <= 2/3 for 2D/3D
+                lambda sequence: len(sequence) == 1,  # 1D problem
                 Use(lambda sequence: [float(x) for x in sequence]),
             ),
             Optional("name"): And(str, Use(normalize_case)),
         },
+        lambda d: validate_dload_profile_fields(d),
     )
 )
+
 
 material_schema = Schema(
     And(
