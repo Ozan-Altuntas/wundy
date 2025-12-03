@@ -351,26 +351,6 @@ def test_euler_beam_stiffness_matches_closed_form():
     assert np.allclose(ke, ke_exact)
 
 
-def test_euler_beam_uniform_load_vector():
-    """Check consistent nodal loads for a uniform transverse load."""
-    q = 1.5
-    L = 2.0
-
-    fe = wundy.first.element_load_euler_bernoulli_uniform(q, L)
-
-    fe_exact = np.array(
-        [
-            q * L / 2.0,
-            q * L * L / 12.0,
-            q * L / 2.0,
-            -q * L * L / 12.0,
-        ],
-        dtype=float,
-    )
-
-    assert np.allclose(fe, fe_exact)
-
-
 def test_arbitrary_dload_manufactured_solution():
     """element_external_force_t1d1_arbitrary integrates q(x) correctly.
 
@@ -405,7 +385,7 @@ def test_arbitrary_dload_manufactured_solution():
     assert np.allclose(f_num, f_exact, rtol=1e-12, atol=1e-12)
 
 
-def test_euler_beam_manufactured_solution():
+def test_element_load_euler_bernoulli_uniform():
     """Check Euler–Bernoulli element load vector for uniform q.
 
     For a 2-node Euler–Bernoulli beam element of length L with constant
@@ -420,8 +400,6 @@ def test_euler_beam_manufactured_solution():
     The implementation in element_load_euler_bernoulli_uniform should match
     this textbook result.
     """
-    E = 2.0
-    I = 3.0
     L = 1.5
     q = 5.0
 
@@ -782,3 +760,108 @@ wundy:
         # 2 elements is a coarse mesh, so use modest tolerances
         assert np.isclose(w_fe, w_exact, rtol=5e-2, atol=1e-6)
         assert np.isclose(theta_fe, theta_exact, rtol=5e-2, atol=1e-6)
+
+
+def test_beam_fe_code_mms_discrete_global():
+    """Discrete MMS: use beam_fe_code stiffness to manufacture a load vector.
+
+    Idea:
+      1. Build a small clamped-free beam model (3 nodes, 2 elements) via YAML.
+      2. Call beam_fe_code with *no loads* to assemble the global stiffness K
+         with boundary conditions applied.
+      3. Choose an arbitrary "manufactured" nodal DOF vector u_exact.
+      4. Compute a compatible load vector F_mms = K @ u_exact.
+      5. Solve K u = F_mms and verify u ≈ u_exact.
+
+    This is a Method of Manufactured Solutions at the *discrete* level:
+    we use the FE operator itself to generate a consistent right-hand side
+    and check that the assembled global system is internally consistent.
+    """
+    # 1. YAML model: 3-node cantilever beam, no loads
+    file = io.StringIO()
+    file.write(
+        """\
+wundy:
+  nodes: [[1, 0.0], [2, 1.0], [3, 2.0]]
+  elements: [[1, 1, 2], [2, 2, 3]]
+  boundary conditions:
+  - name: clamp-left-w
+    nodes: [1]
+    dof: x
+    value: 0.0
+  - name: clamp-left-theta
+    nodes: [1]
+    dof: y
+    value: 0.0
+  materials:
+  - type: elastic
+    name: mat-1
+    parameters:
+      E: 10.0
+      nu: 0.3
+  element blocks:
+  - material: mat-1
+    name: beam-block
+    elements: ALL
+    element:
+      type: t1d1
+      properties:
+        area: 1.0
+        I: 2.0
+"""
+    )
+    file.seek(0)
+
+    # YAML → preprocess
+    data = wundy.ui.load(file)
+    inp = wundy.ui.preprocess(data)
+
+    # 2. Assemble global stiffness with beam_fe_code, but with no distributed loads
+    sol_empty = wundy.first.beam_fe_code(
+        inp["coords"],
+        inp["blocks"],
+        inp["bcs"],
+        [],  # no distributed loads
+        inp["materials"],
+        inp["block_elem_map"],
+    )
+
+    K = sol_empty["stiff"]
+
+    # 3. Manufactured displacement field: arbitrary but consistent size
+    # DOF ordering from beam_fe_code: [w1, theta1, w2, theta2, w3, theta3]
+    n_dofs = K.shape[0]
+    assert n_dofs == 6
+
+    u_exact = np.array(
+        [
+            0.0,  # w1 (clamped, should stay 0)
+            0.0,  # theta1 (clamped, should stay 0)
+            0.10,  # w2
+            0.02,  # theta2
+            -0.05,  # w3
+            0.01,  # theta3
+        ],
+        dtype=float,
+    )
+
+    # 4. Manufactured load vector from FE operator
+    F_mms = K @ u_exact
+
+    # 5. Solve only on the free DOFs (respecting Dirichlet BCs on node 1)
+    prescribed_idx = np.array([0, 1], dtype=int)  # w1, theta1
+    prescribed_vals = u_exact[prescribed_idx]      # here [0.0, 0.0]
+    all_dofs = np.arange(n_dofs, dtype=int)
+    free_dofs = np.setdiff1d(all_dofs, prescribed_idx)
+
+    Kff = K[np.ix_(free_dofs, free_dofs)]
+    Kfp = K[np.ix_(free_dofs, prescribed_idx)]
+    Ff = F_mms[free_dofs] - Kfp @ prescribed_vals
+
+    uf = np.linalg.solve(Kff, Ff)
+
+    u_num = np.zeros_like(u_exact)
+    u_num[prescribed_idx] = prescribed_vals
+    u_num[free_dofs] = uf
+
+    assert np.allclose(u_num, u_exact, rtol=1e-12, atol=1e-12)

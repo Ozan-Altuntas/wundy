@@ -95,7 +95,7 @@ f_e =
 The solver assumes:
 
 1. **1D domain** with nodes on the real line.
-2. **Two-node bar or bar elements** (called `T1D1`).
+2. **Two-node bar or beam elements** (called `T1D1`).
 3. **One or two degrees of freedom per node for bar and beam elements respectively** (axial displacement in the x-direction).
 4. **Linear elastic and Neo-Hookean materials**.
 5. **Small-strain linear kinematics**.
@@ -162,6 +162,7 @@ wundy:
       profile : UNIFORM_or_EQUATION #Optional for BX and GRAV 
       expression : "a*x**2 + b*x" #Only for profile: EQUATION,Python expression in the variable x, evaluated at the Gauss points 
       direction: [±1.0]
+```
 
 ### 3.2 Processing of the Input File
 
@@ -234,9 +235,9 @@ Euler–Bernoulli beam element.
 
 Each node carries two DOFs:
 
-DOF 0 (dof: x in YAML): transverse displacement (𝑤)
+DOF 0 (dof: x in YAML): transverse displacement w
 
-DOF 1 (dof: y in YAML): rotation (𝜃)
+DOF 1 (dof: y in YAML): rotation theta
 
 Assembles the global beam stiffness matrix using
 element_stiffness_euler_bernoulli.
