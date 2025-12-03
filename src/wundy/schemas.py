@@ -66,15 +66,15 @@ def bc_type_to_enum(bc_type: str) -> int:
 
 def valid_dof_id(dof: str):
     # extension to 2/3D: allow dof to be xyz
-    return normalize_case(dof) in {"X"}
+    return normalize_case(dof) in {"X", "Y"}
 
 
 def valid_dload_type(arg: str):
     # extension to 2/3D: allow other DLOADs
-    return normalize_case(arg) in {"BX", "GRAV"}
+    return normalize_case(arg) in {"BX", "GRAV", "QY"}
 
 
-dload_profiles = {"UNIFORM", "TABLE", "EQUATION"}
+dload_profiles = {"UNIFORM", "EQUATION"}
 
 
 def valid_dload_profile(arg: str) -> bool:
@@ -85,23 +85,12 @@ def validate_dload_profile_fields(d: dict[str, Any]) -> bool:
     """Cross-field checks for distributed-load profiles.
 
     - UNIFORM  : must have "value"
-    - TABLE    : must have matching "x" and "q" arrays (length >= 2)
     - EQUATION : must have an "expression" string
     """
     profile = normalize_case(d.get("profile", "UNIFORM"))
 
     if profile == "UNIFORM":
         return "value" in d
-
-    if profile == "TABLE":
-        return (
-            "x" in d
-            and "q" in d
-            and isinstance(d["x"], list)
-            and isinstance(d["q"], list)
-            and len(d["x"]) == len(d["q"])
-            and len(d["x"]) >= 2
-        )
 
     if profile == "EQUATION":
         expr = d.get("expression")
@@ -112,7 +101,15 @@ def validate_dload_profile_fields(d: dict[str, Any]) -> bool:
 
 def validate_element(elem: dict[str, Any]) -> bool:
     if normalize_case(elem["type"]) == "T1D1":
-        schema = Schema({Optional("area", default=1.0): And(isnumeric, ispositive)})
+        # T1D1 is used for both axial bars and Euler–Bernoulli beams.
+        # - area: cross-sectional area (axial stiffness EA)
+        # - I   : second moment of area (bending stiffness EI)
+        schema = Schema(
+            {
+                Optional("area", default=1.0): And(isnumeric, ispositive),
+                Optional("I"): And(isnumeric, ispositive),
+            }
+        )
         v = schema.validate(elem["properties"])
         elem["properties"].update(v)
     else:
@@ -215,14 +212,11 @@ dload_schema = Schema(
                 And(list, list_of_int),  # list of elements
             ),
             "type": And(str, valid_dload_type, Use(normalize_case)),
-            # For UNIFORM loads we still use "value".
+            # For UNIFORM loads we use "value"; GRAV also uses "value".
             Optional("value", default=0.0): Use(float),
-            # New: distributed-load profile
+            # Profile: UNIFORM (default) or EQUATION
             Optional("profile", default="UNIFORM"): And(str, Use(normalize_case)),
-            # New: TABLE data
-            Optional("x"): And(list, list_of_numeric),
-            Optional("q"): And(list, list_of_numeric),
-            # New: EQUATION data
+            # EQUATION data
             Optional("expression"): And(str),
             "direction": And(
                 list,
@@ -235,7 +229,6 @@ dload_schema = Schema(
         lambda d: validate_dload_profile_fields(d),
     )
 )
-
 
 material_schema = Schema(
     And(
