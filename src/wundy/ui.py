@@ -284,13 +284,9 @@ def preprocess(data: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         if "value" in dl:
             entry["value"] = dl["value"]
 
-        # Optional arbitrary-load fields, already validated by schemas.py
+        # Optional profile and equation string for arbitrary loads
         if "profile" in dl:
             entry["profile"] = dl["profile"]
-        if "x" in dl:
-            entry["x"] = [float(x) for x in dl["x"]]
-        if "q" in dl:
-            entry["q"] = [float(q) for q in dl["q"]]
         if "expression" in dl:
             entry["expression"] = dl["expression"]
 

@@ -543,8 +543,9 @@ def element_external_force_t1d1_arbitrary(
 
     q_func(x) returns the load at physical coordinate x.
     """
-    x1, _ = xe[0]
-    x2, _ = xe[1]
+    # Support both 1D coords (shape (2, 1)) and 2D coords (shape (2, 2)).
+    x1 = float(xe[0, 0])
+    x2 = float(xe[1, 0])
     L = x2 - x1
 
     # 2-point Gauss rule
@@ -639,20 +640,11 @@ def apply_distributed_loads(
                     q = float(dload["value"]) * sign
                     qe = element_external_force_t1d1(q, he)
 
-                elif profile == "TABLE":
-                    x_tab = np.asarray(dload["x"], dtype=float)
-                    q_tab = np.asarray(dload["q"], dtype=float)
-
-                    def q_func(x, x_tab=x_tab, q_tab=q_tab, sign=sign):
-                        return float(np.interp(x, x_tab, q_tab)) * sign
-
-                    qe = element_external_force_t1d1_arbitrary(xe, q_func)
-
                 elif profile == "EQUATION":
                     expr = dload["expression"]
 
                     def q_func(x, expr=expr, sign=sign):
-                        # Safe-ish environment: only x and numpy
+                        # Simple environment for expression evaluation: only x and numpy
                         return float(eval(expr, {"x": x, "np": np})) * sign
 
                     qe = element_external_force_t1d1_arbitrary(xe, q_func)
@@ -666,6 +658,12 @@ def apply_distributed_loads(
                 q = rho * area * float(dload["value"]) * sign
                 qe = element_external_force_t1d1(q, he)
 
+            elif dtype == "QY":
+                # Transverse uniform load on Euler–Bernoulli beam.
+                # We expect this to be used with beam_fe_code (dof_per_node = 2).
+                q = float(dload["value"]) * sign
+                L = he  # beam length
+                qe = element_load_euler_bernoulli_uniform(q, L)
             else:
                 raise NotImplementedError(f"dload type {dtype!r} not supported for 1D")
 
@@ -951,6 +949,78 @@ def newton_bar_neo_hooke_1d(
     raise RuntimeError(
         f"Newton solver did not converge in {max_iter} iterations; final residual norm = {res_norm}"
     )
+
+
+def beam_fe_code(
+    coords: NDArray[np.float64],
+    blocks: list[dict[str, Any]],
+    bcs: list[dict[str, Any]],
+    dloads: list[dict[str, Any]],
+    materials: dict[str, Any],
+    block_elem_map: dict[int, tuple[int, int]],
+) -> dict[str, Any]:
+    """Assemble and solve a 1D Euler–Bernoulli beam problem.
+
+    This solver assumes:
+      * two degrees of freedom per node: w (transverse displacement) and
+        theta (rotation),
+      * two-node beam elements,
+      * uniform transverse distributed loads (type 'QY') using
+        element_load_euler_bernoulli_uniform.
+
+    The YAML/preprocess path is the same as for first_fe_code; the
+    difference is only in how element stiffness and loads are formed.
+    """
+    dof_per_node: int = 2
+    num_node = coords.shape[0]
+    num_dof = int(num_node * dof_per_node)
+
+    K = np.zeros((num_dof, num_dof), dtype=float)
+    F = np.zeros(num_dof, dtype=float)
+
+    # --- Assemble element stiffness matrices ---
+    for block in blocks:
+        # Material: we reuse E from the existing elastic material
+        material = materials[block["material"]]
+        E = material_tangent_stiffness_elastic(material)
+
+        # Element properties: need second moment of area I
+        props = block["element"]["properties"]
+        try:
+            I = float(props["I"])
+        except KeyError as exc:
+            raise KeyError(
+                "Beam solver expects element property 'I' "
+                "(second moment of area) in the YAML element block."
+            ) from exc
+
+        for nodes in block["connect"]:
+            # Beam element length from nodal coordinates (x only)
+            xe = coords[nodes]
+            L = float(xe[1, 0] - xe[0, 0])
+            if L <= 0.0:
+                raise ValueError(f"Beam element length must be positive, got L = {L}")
+
+            ke = element_stiffness_euler_bernoulli(E, I, L)
+
+            # DOF ordering per element: [w1, theta1, w2, theta2]
+            eft = [
+                global_dof(nodes[0], 0, dof_per_node),  # w1
+                global_dof(nodes[0], 1, dof_per_node),  # theta1
+                global_dof(nodes[1], 0, dof_per_node),  # w2
+                global_dof(nodes[1], 1, dof_per_node),  # theta2
+            ]
+            K[np.ix_(eft, eft)] += ke
+
+    # --- External forces: point loads + distributed loads ---
+    apply_neumann_bcs(F, bcs, dof_per_node)
+    apply_distributed_loads(F, dloads, coords, blocks, block_elem_map, materials, dof_per_node)
+
+    # --- Dirichlet boundary conditions and solve ---
+    prescribed_idx, prescribed_vals = collect_dirichlet_dofs(bcs, dof_per_node)
+    dofs = solve_reduced_system(K, F, prescribed_idx, prescribed_vals)
+
+    return {"dofs": dofs, "stiff": K, "force": F}
 
 
 def global_dof(node: int, local_dof: int, dof_per_node: int) -> int:
