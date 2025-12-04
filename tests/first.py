@@ -686,8 +686,8 @@ def _exact_cantilever_uniform_q(
     return w, theta
 
 
-def test_beam_fe_code_mms_cantilever_uniform_qy():
-    """MMS: global beam solver vs analytic cantilever with uniform QY load."""
+def test_beam_fe_code_cantilever_uniform_qy():
+    """Global beam solver vs analytic cantilever with uniform QY load."""
     file = io.StringIO()
     file.write(
         """\
@@ -763,42 +763,81 @@ wundy:
 
 
 def test_beam_fe_code_mms_discrete_global():
-    """Discrete MMS: use beam_fe_code stiffness to manufacture a load vector.
+    """Continuous MMS: manufactured w(x) for a beam with QY equation load.
 
-    Idea:
-      1. Build a small clamped-free beam model (3 nodes, 2 elements) via YAML.
-      2. Call beam_fe_code with *no loads* to assemble the global stiffness K
-         with boundary conditions applied.
-      3. Choose an arbitrary "manufactured" nodal DOF vector u_exact.
-      4. Compute a compatible load vector F_mms = K @ u_exact.
-      5. Solve K u = F_mms and verify u ≈ u_exact.
+    We choose a smooth manufactured solution
 
-    This is a Method of Manufactured Solutions at the *discrete* level:
-    we use the FE operator itself to generate a consistent right-hand side
-    and check that the assembled global system is internally consistent.
+        w_exact(x)     = x^5
+        theta_exact(x) = w'(x) = 5 x^4
+
+    For an Euler–Bernoulli beam, the governing equation is
+
+        E I w''''(x) = q(x).
+
+    Differentiating w_exact gives w''''(x) = 120 x, so
+
+        q(x) = 120 E I x.
+
+    We then:
+
+      1. Encode q(x) as a QY distributed load with profile = EQUATION
+         and expression = "coef_q * x".
+      2. Apply Dirichlet boundary conditions at both ends so that
+         w and theta match w_exact and theta_exact at x = 0 and x = L.
+      3. Solve with beam_fe_code.
+      4. Check that the FE nodal DOFs reproduce the manufactured
+         values at each node (within a modest tolerance).
     """
-    # 1. YAML model: 3-node cantilever beam, no loads
+    # Material and geometry
+    E = 10.0
+    I = 2.0
+    L = 2.0  # beam from x=0 to x=2 with nodes at 0, 1, 2
+
+    def w_exact(x: float) -> float:
+        return x**5
+
+    def theta_exact(x: float) -> float:
+        return 5.0 * x**4
+
+    # From w''''(x) = 120 x  ->  q(x) = 120 * E * I * x
+    coef_q = 120.0 * E * I
+
     file = io.StringIO()
     file.write(
-        """\
+        f"""\
 wundy:
   nodes: [[1, 0.0], [2, 1.0], [3, 2.0]]
   elements: [[1, 1, 2], [2, 2, 3]]
   boundary conditions:
-  - name: clamp-left-w
+  - name: left-w
     nodes: [1]
     dof: x
-    value: 0.0
-  - name: clamp-left-theta
+    value: {w_exact(0.0)}
+  - name: left-theta
     nodes: [1]
     dof: y
-    value: 0.0
+    value: {theta_exact(0.0)}
+  - name: right-w
+    nodes: [3]
+    dof: x
+    value: {w_exact(L)}
+  - name: right-theta
+    nodes: [3]
+    dof: y
+    value: {theta_exact(L)}
   materials:
   - type: elastic
     name: mat-1
     parameters:
-      E: 10.0
+      E: {E}
       nu: 0.3
+  distributed loads:
+  - name: qy-mms
+    type: QY
+    elements: [1, 2]
+    profile: EQUATION
+    expression: "{coef_q}*x"
+    direction: [1.0]
   element blocks:
   - material: mat-1
     name: beam-block
@@ -807,61 +846,34 @@ wundy:
       type: t1d1
       properties:
         area: 1.0
-        I: 2.0
+        I: {I}
 """
     )
     file.seek(0)
 
-    # YAML → preprocess
+    # YAML → preprocess → global beam solver
     data = wundy.ui.load(file)
     inp = wundy.ui.preprocess(data)
-
-    # 2. Assemble global stiffness with beam_fe_code, but with no distributed loads
-    sol_empty = wundy.first.beam_fe_code(
+    sol = wundy.first.beam_fe_code(
         inp["coords"],
         inp["blocks"],
         inp["bcs"],
-        [],  # no distributed loads
+        inp["dload"],
         inp["materials"],
         inp["block_elem_map"],
     )
 
-    K = sol_empty["stiff"]
+    dofs = sol["dofs"]
 
-    # 3. Manufactured displacement field: arbitrary but consistent size
-    # DOF ordering from beam_fe_code: [w1, theta1, w2, theta2, w3, theta3]
-    n_dofs = K.shape[0]
-    assert n_dofs == 6
+    # Nodal x-coordinates from preprocessed input
+    x_nodes = inp["coords"][:, 0]
 
-    u_exact = np.array(
-        [
-            0.0,  # w1 (clamped, should stay 0)
-            0.0,  # theta1 (clamped, should stay 0)
-            0.10,  # w2
-            0.02,  # theta2
-            -0.05,  # w3
-            0.01,  # theta3
-        ],
-        dtype=float,
-    )
+    # DOF ordering for beam_fe_code is [w1, theta1, w2, theta2, w3, theta3]
+    for a, x in enumerate(x_nodes):
+        w_fe = dofs[2 * a]
+        theta_fe = dofs[2 * a + 1]
 
-    # 4. Manufactured load vector from FE operator
-    F_mms = K @ u_exact
-
-    # 5. Solve only on the free DOFs (respecting Dirichlet BCs on node 1)
-    prescribed_idx = np.array([0, 1], dtype=int)  # w1, theta1
-    prescribed_vals = u_exact[prescribed_idx]      # here [0.0, 0.0]
-    all_dofs = np.arange(n_dofs, dtype=int)
-    free_dofs = np.setdiff1d(all_dofs, prescribed_idx)
-
-    Kff = K[np.ix_(free_dofs, free_dofs)]
-    Kfp = K[np.ix_(free_dofs, prescribed_idx)]
-    Ff = F_mms[free_dofs] - Kfp @ prescribed_vals
-
-    uf = np.linalg.solve(Kff, Ff)
-
-    u_num = np.zeros_like(u_exact)
-    u_num[prescribed_idx] = prescribed_vals
-    u_num[free_dofs] = uf
-
-    assert np.allclose(u_num, u_exact, rtol=1e-12, atol=1e-12)
+        # Two cubic Hermite elements won't reproduce x^5 exactly, so use
+        # a modest tolerance; we just want to ensure the MMS pipeline is wired.
+        assert np.isclose(w_fe, w_exact(float(x)), rtol=5e-2, atol=1e-8)
+        assert np.isclose(theta_fe, theta_exact(float(x)), rtol=5e-2, atol=1e-8)

@@ -535,6 +535,60 @@ def element_load_euler_bernoulli_uniform(
     )
 
 
+def element_load_euler_bernoulli_arbitrary(
+    xe: NDArray[np.float64],
+    q_func: Callable[[float], float],
+) -> NDArray[np.float64]:
+    """Consistent nodal load vector for arbitrary transverse load q(x).
+
+    Two-node Euler–Bernoulli beam with DOFs [w1, theta1, w2, theta2].
+    q_func(x) returns the transverse load at global coordinate x.
+
+    This computes
+
+        f_e = ∫_0^L N(x)^T q(x) dx
+
+    using 2-point Gauss quadrature mapped from the reference coordinate
+    xi ∈ [-1, 1]. The Hermite cubic shape functions are written in terms
+    of the non-dimensional coordinate s = x / L ∈ [0, 1].
+    """
+    x1 = float(xe[0, 0])
+    x2 = float(xe[1, 0])
+    L = x2 - x1
+    if L <= 0.0:
+        raise ValueError(f"Beam element length must be positive, got L = {L}")
+
+    # 2-point Gauss rule on xi ∈ [-1, 1]
+    xi_gp, w_gp = gauss_points_1d_two_point()
+
+    fe = np.zeros(4, dtype=float)
+
+    for a in range(xi_gp.size):
+        xi = float(xi_gp[a])
+        w = float(w_gp[a])
+
+        # Map xi ∈ [-1,1] → s ∈ [0,1] → x ∈ [x1,x2]
+        s = 0.5 * (xi + 1.0)  # s = (xi + 1)/2
+        x = x1 + s * L
+
+        qx = float(q_func(x))
+
+        # Hermite cubic shape functions in terms of s ∈ [0,1]
+        N1 = 1.0 - 3.0 * s**2 + 2.0 * s**3  # w1
+        N2 = L * (s - 2.0 * s**2 + s**3)  # theta1
+        N3 = 3.0 * s**2 - 2.0 * s**3  # w2
+        N4 = L * (-(s**2) + s**3)  # theta2
+
+        N = np.array([N1, N2, N3, N4], dtype=float)
+
+        # Jacobian: x(xi) ⇒ dx/dxi = L/2
+        J = L / 2.0
+
+        fe += N * qx * J * w
+
+    return fe
+
+
 def element_external_force_t1d1_arbitrary(
     xe: NDArray[np.float64],
     q_func: Callable[[float], float],
@@ -659,11 +713,26 @@ def apply_distributed_loads(
                 qe = element_external_force_t1d1(q, he)
 
             elif dtype == "QY":
-                # Transverse uniform load on Euler–Bernoulli beam.
-                # We expect this to be used with beam_fe_code (dof_per_node = 2).
-                q = float(dload["value"]) * sign
+                # Transverse load on Euler–Bernoulli beam.
+                # Used with beam_fe_code (dof_per_node = 2).
                 L = he  # beam length
-                qe = element_load_euler_bernoulli_uniform(q, L)
+
+                if profile == "UNIFORM":
+                    q = float(dload["value"]) * sign
+                    qe = element_load_euler_bernoulli_uniform(q, L)
+
+                elif profile == "EQUATION":
+                    expr = dload["expression"]
+
+                    def q_func(x, expr=expr, sign=sign):
+                        # Simple, controlled eval environment: x and numpy
+                        return float(eval(expr, {"x": x, "np": np})) * sign
+
+                    qe = element_load_euler_bernoulli_arbitrary(xe, q_func)
+
+                else:
+                    raise ValueError(f"Unknown distributed-load profile {profile!r}")
+
             else:
                 raise NotImplementedError(f"dload type {dtype!r} not supported for 1D")
 
