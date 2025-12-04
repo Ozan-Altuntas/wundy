@@ -16,9 +16,15 @@ All core functionality is covered by unit tests in `tests/`.
 ## Documentation
 - [User Manual](docs/user_manual.md)
 
-## Installlation
+### Clone repository
 
-You can use a virtual environment (recommended):
+```console
+git clone git@github.com:Ozan-ALtuntas/wundy
+```
+
+## Installation
+
+To install Wundy, create and activate a virtual environment:
 
 ```bash
 python -m venv .venv
@@ -28,19 +34,8 @@ source .venv/bin/activate         # on Linux/macOS
 
 pip install -e .
 pip install -r requirements.txt   # if you have one
-
-### Clone repository
-
-```console
-git clone git@github.com:Ozan-ALtuntas/wundy
 ```
-### Create virtual environment
-
-```console
-python3 -m venv venv
-source activate venv/bin/activate
-```
-## Test
+## Testing
 
 In the `wundy` directory, execute
 
@@ -64,7 +59,7 @@ everything is set up correctly.
   - Axial bar (linear elasticity, Neo-Hooke bar)
   - Euler–Bernoulli beam (bending in a single plane)
 
-  ### Materials
+### Materials
 
 - `ELASTIC`  
   - Parameters: `E`, `nu`  
@@ -113,6 +108,7 @@ everything is set up correctly.
 
 Minimal YAML input ("bar_example.yml"):
 
+```yaml:
 wundy:
   nodes: [[1, 0], [2, 1], [3, 2], [4, 3], [5, 4]]
   elements: [[1, 1, 2], [2, 2, 3], [3, 3, 4], [4, 4, 5]]
@@ -143,9 +139,11 @@ wundy:
       type: t1d1
       properties:
         area: 1.0
+```
 
 In Python driver:
 
+```python:
 import io
 import wundy
 
@@ -165,6 +163,7 @@ soln = wundy.first.first_fe_code(
 print("Displacements:", soln["dofs"])
 print("Stiffness matrix:\n", soln["stiff"])
 print("Force vector:", soln["force"])
+```
 
 ---
 
@@ -172,6 +171,7 @@ print("Force vector:", soln["force"])
 
 YAML for a single beam element from 0 to L=2 fixed on the left and uniform downward load q=1.5 ("beam_example.yml"):
 
+```yaml:
 wundy:
   nodes: [[1, 0.0], [2, 2.0]]
   elements: [[1, 1, 2]]
@@ -209,9 +209,11 @@ wundy:
       properties:
         area: 1.0
         I: 2.0
+```
 
 In Python driver:
 
+```python:
 import io
 import wundy
 
@@ -229,6 +231,7 @@ soln = wundy.first.beam_fe_code(
 )
 
 print("Beam DOFs (w1, theta1, w2, theta2, ...):", soln["dofs"])
+```
 
 ---
 
