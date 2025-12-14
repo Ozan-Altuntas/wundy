@@ -351,7 +351,26 @@ def test_euler_beam_stiffness_matches_closed_form():
     assert np.allclose(ke, ke_exact)
 
 
-def test_arbitrary_dload_manufactured_solution():
+def test_euler_beam_uniform_load_vector():
+    """Check consistent nodal loads for a uniform transverse load."""
+    q = 1.5
+    L = 2.0
+
+    fe = wundy.first.element_load_euler_bernoulli_uniform(q, L)
+
+    fe_exact = np.array(
+        [
+            q * L / 2.0,
+            q * L * L / 12.0,
+            q * L / 2.0,
+            -q * L * L / 12.0,
+        ],
+        dtype=float,
+    )
+
+    assert np.allclose(fe, fe_exact)
+
+def test_arbitrary_dload():
     """element_external_force_t1d1_arbitrary integrates q(x) correctly.
 
     We take a single element from x=0 to x=1, shape functions
@@ -383,39 +402,6 @@ def test_arbitrary_dload_manufactured_solution():
     f_exact = np.array([1.0 / 12.0, 1.0 / 4.0], dtype=float)
 
     assert np.allclose(f_num, f_exact, rtol=1e-12, atol=1e-12)
-
-
-def test_element_load_euler_bernoulli_uniform():
-    """Check Euler–Bernoulli element load vector for uniform q.
-
-    For a 2-node Euler–Bernoulli beam element of length L with constant
-    transverse distributed load q (downward positive), the consistent
-    nodal load vector in local coordinates is
-
-        [ q L / 2,
-          q L^2 / 12,
-          q L / 2,
-         -q L^2 / 12 ]^T.
-
-    The implementation in element_load_euler_bernoulli_uniform should match
-    this textbook result.
-    """
-    L = 1.5
-    q = 5.0
-
-    fe_num = wundy.first.element_load_euler_bernoulli_uniform(q, L)
-
-    fe_exact = np.array(
-        [
-            q * L / 2.0,
-            q * L**2 / 12.0,
-            q * L / 2.0,
-            -q * L**2 / 12.0,
-        ],
-        dtype=float,
-    )
-
-    assert np.allclose(fe_num, fe_exact, rtol=1e-12, atol=1e-12)
 
 
 def test_equation_profile_bx_via_yaml():
@@ -477,6 +463,15 @@ wundy:
 
     F = soln["force"]
     assert np.allclose(F, [1.0 / 12.0, 1.0 / 4.0], rtol=1e-12, atol=1e-12)
+
+
+def _exact_cantilever_uniform_q(
+    x: float, L: float, E: float, I: float, q: float
+) -> tuple[float, float]:
+    """Exact w(x), theta(x) for a cantilever under uniform load q."""
+    w = q * x**2 * (6 * L**2 - 4 * L * x + x**2) / (24.0 * E * I)
+    theta = q * x * (3 * L**2 - 3 * L * x + x**2) / (6.0 * E * I)
+    return w, theta
 
 
 def test_beam_fe_code_single_element_point_load():
@@ -677,15 +672,6 @@ wundy:
     assert np.allclose(u, u_ref)
 
 
-def _exact_cantilever_uniform_q(
-    x: float, L: float, E: float, I: float, q: float
-) -> tuple[float, float]:
-    """Exact w(x), theta(x) for a cantilever under uniform load q."""
-    w = q * x**2 * (6 * L**2 - 4 * L * x + x**2) / (24.0 * E * I)
-    theta = q * x * (3 * L**2 - 3 * L * x + x**2) / (6.0 * E * I)
-    return w, theta
-
-
 def test_beam_fe_code_cantilever_uniform_qy():
     """Global beam solver vs analytic cantilever with uniform QY load."""
     file = io.StringIO()
@@ -873,7 +859,93 @@ wundy:
         w_fe = dofs[2 * a]
         theta_fe = dofs[2 * a + 1]
 
-        # Two cubic Hermite elements won't reproduce x^5 exactly, so use
-        # a modest tolerance; we just want to ensure the MMS pipeline is wired.
         assert np.isclose(w_fe, w_exact(float(x)), rtol=5e-2, atol=1e-8)
         assert np.isclose(theta_fe, theta_exact(float(x)), rtol=5e-2, atol=1e-8)
+
+
+def test_newton_bar_neo_hooke_single_element_matches_closed_form_finite_strain():
+    """
+    Nonlinear solver test (not just material law):
+
+    Single 2-node bar, left end fixed, right end has axial point load T.
+    For a 1D Neo-Hooke "class model" with P(F) = (E/2)(F - 1/F),
+    uniform equilibrium implies T = A*P(F) and F is constant.
+
+    Closed form:
+        alpha = 2T/(E A)
+        F = (alpha + sqrt(alpha^2 + 4))/2
+        u2 = (F - 1)*L
+    """
+    # Pick values that give clearly non-small strain
+    E = 10.0
+    A = 1.0
+    L = 1.0
+    T = 7.5  # this produces F=2 exactly for this model when E=10, A=1
+
+    file = io.StringIO()
+    file.write(
+        f"""\
+wundy:
+  nodes: [[1, 0.0], [2, {L}]]
+  elements: [[1, 1, 2]]
+  boundary conditions:
+  - name: fix-left
+    dof: x
+    nodes: [1]
+    value: 0.0
+  concentrated loads:
+  - name: end-force
+    nodes: [2]
+    value: {T}
+  materials:
+  - type: elastic
+    name: mat-1
+    parameters:
+      E: {E}
+      nu: 0.3
+  element blocks:
+  - material: mat-1
+    name: block-1
+    elements: ALL
+    element:
+      type: t1d1
+      properties:
+        area: {A}
+"""
+    )
+    file.seek(0)
+
+    data = wundy.ui.load(file)
+    inp = wundy.ui.preprocess(data)
+
+    sol = wundy.first.newton_bar_neo_hooke_1d(
+        inp["coords"],
+        inp["blocks"],
+        inp["bcs"],
+        inp["dload"],
+        inp["materials"],
+        inp["block_elem_map"],
+        max_iter=50,
+        tol=1e-12,
+    )
+
+    u = sol["dofs"]
+
+    # --- Closed-form expected displacement ---
+    alpha = 2.0 * T / (E * A)
+    F_exact = 0.5 * (alpha + np.sqrt(alpha * alpha + 4.0))
+    u2_exact = (F_exact - 1.0) * L
+
+    # Left is fixed, right should match analytic result
+    assert np.isclose(u[0], 0.0, atol=1e-14)
+    assert np.isclose(u[1], u2_exact, rtol=1e-12, atol=1e-12)
+
+    # Extra solver-level sanity checks (optional but nice):
+    # 1) The computed stretch from FE kinematics matches F_exact
+    F_fe = 1.0 + (u[1] - u[0]) / L
+    assert np.isclose(F_fe, F_exact, rtol=1e-12, atol=1e-12)
+
+    # 2) Force balance: internal - external residual on free DOF is ~0
+    #    (Node 2 is the only free DOF here)
+    R = sol["residual"]
+    assert np.isclose(R[1], 0.0, atol=1e-10)

@@ -11,9 +11,23 @@
 The code assembles the global stiffness matrix, applies boundary
 conditions, processes concentrated and distributed loads, and returns
 the global displacement vector, stiffness matrix, and force vector.
+**Wundy** is a one-dimensional finite element (FE) solver for:
+
+- Linear axial bar problems,
+- A nonlinear 1D Neo-Hooke bar solved with Newton’s method,
+- Euler–Bernoulli beam bending in a single plane.
+
+The code assembles the global stiffness matrix, applies boundary
+conditions, processes concentrated and distributed loads, and returns
+the global displacement vector, stiffness matrix, and force vector.
 
 This manual describes:
 
+- The physical problems solved by Wundy,
+- The structure of a valid YAML input file,
+- Node, element, material, boundary-condition, and load syntax,
+- The preprocessing rules applied before assembly,
+- The available global solvers.
 - The physical problems solved by Wundy,
 - The structure of a valid YAML input file,
 - Node, element, material, boundary-condition, and load syntax,
@@ -91,6 +105,67 @@ f_e =
 ---
 
 ### 2.4 Assumptions
+- \( E \) — Young’s modulus  
+- \( A \) — cross-sectional area  
+- \( u(x) \) — axial displacement  
+- \( q(x) \) — distributed axial load per unit length.
+
+The domain is discretized into 2-node `T1D1` bar elements with
+linear shape functions.
+
+### 2.2 Nonlinear Neo-Hooke Bar
+
+For the Neo-Hooke bar, the solver `newton_bar_neo_hooke_1d` uses a 1D
+first Piola–Kirchhoff stress law of the form
+
+\[
+P(F) = \frac{E}{2} \left(F - \frac{1}{F}\right),
+\]
+
+with \( F \) the axial stretch. At small strain (near \(F=1\)), the
+tangent \( dP/dF \) reduces to \( E \), so the Neo-Hooke response
+matches linear elasticity in the limit. A Newton–Raphson iteration is
+used to solve the nonlinear equilibrium equations.
+
+### 2.3 Euler–Bernoulli Beam
+
+For bending, Wundy uses a 2-node Euler–Bernoulli beam element with
+transverse displacement \( w(x) \) and rotation \( \theta(x) \) at each
+node. The element has 4 DOFs:
+
+\[
+[w_1,\, \theta_1,\, w_2,\, \theta_2]^T.
+\]
+
+The standard 4×4 Euler–Bernoulli stiffness matrix is used:
+
+\[
+k_e = \frac{EI}{L^3}
+\begin{bmatrix}
+12   & 6L   & -12 & 6L \\
+6L   & 4L^2 & -6L & 2L^2 \\
+-12  & -6L  & 12  & -6L \\
+6L   & 2L^2 & -6L & 4L^2
+\end{bmatrix},
+\]
+
+where \( E \) is Young’s modulus, \( I \) is the second moment of area,
+and \( L \) is the element length.
+
+For a uniform transverse load \( q \), the consistent nodal load vector
+is
+
+\[
+f_e =
+\begin{bmatrix}
+qL/2 \\
+qL^2/12 \\
+qL/2 \\
+-qL^2/12
+\end{bmatrix}.
+\]
+
+### Assumptions
 
 The solver assumes:
 
@@ -103,6 +178,9 @@ The solver assumes:
 
 ---
 
+## 3. Input Files
+
+### 3.1 Overview of the Input File
 ## 3. Input Files
 
 ### 3.1 Overview of the Input File
@@ -134,9 +212,11 @@ wundy:
         properties:
           area: cross_section_area
           I : moment_of_inertia
+          I : moment_of_inertia
 
   boundary conditions:
     - nodes: node_ids_or_node_set
+      dof: x_or_y
       dof: x_or_y
       value: displacement_or_force
       type: DIRICHLET_or_NEUMANN
@@ -152,12 +232,18 @@ wundy:
   concentrated loads:
     - nodes: node_ids_or_node_set
       dof: x_or_y_
+      dof: x_or_y_
       value: nodal_force_value
 
   distributed loads:
     -name: dload_1
     - type: load_type   # BX, GRAV, or QY
+    -name: dload_1
+    - type: load_type   # BX, GRAV, or QY
       elements: element_set_or_ids
+      value: load_magnitude #Needed for UNIFORM profile and QY
+      profile : UNIFORM_or_EQUATION #Optional for BX and GRAV 
+      expression : "a*x**2 + b*x" #Only for profile: EQUATION,Python expression in the variable x, evaluated at the Gauss points 
       value: load_magnitude #Needed for UNIFORM profile and QY
       profile : UNIFORM_or_EQUATION #Optional for BX and GRAV 
       expression : "a*x**2 + b*x" #Only for profile: EQUATION,Python expression in the variable x, evaluated at the Gauss points 

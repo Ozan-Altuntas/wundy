@@ -796,6 +796,11 @@ def solve_reduced_system(
     all_dofs: NDArray[np.int_] = np.arange(num_dof, dtype=int)
     free_dofs: NDArray[np.int_] = np.setdiff1d(all_dofs, prescribed_idx)
 
+    if free_dofs.size == 0:
+        dofs = np.zeros(num_dof, dtype=float)
+        dofs[prescribed_idx] = prescribed_vals
+        return dofs
+
     Kff = K[np.ix_(free_dofs, free_dofs)]
     Kfp = K[np.ix_(free_dofs, prescribed_idx)]
     Ff = F[free_dofs] - Kfp @ prescribed_vals
